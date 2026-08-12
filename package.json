@@ -1,0 +1,27 @@
+{
+  "name": "vitalis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Unified training, nutrition, recovery and biomarker tracking with batch ingestion from wearables and lab providers.",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "typecheck": "tsc --noEmit",
+    "check": "node --experimental-strip-types --import ./scripts/ts-resolve.mjs scripts/check.ts",
+    "shots": "node scripts/shots.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "next": "15.5.4",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "recharts": "^2.15.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "typescript": "^5.7.0"
+  }
+}
