@@ -1,7 +1,6 @@
 import { simDayMap } from '../sim/athlete';
-import { daysInWindow, pageWindow, simulateCall } from './transport';
+import { apiFetch, daysInWindow, pageWindow, simulateCall } from './transport';
 import {
-  NotConfiguredError,
   type Connector,
   type FetchContext,
   type FetchPage,
@@ -45,6 +44,173 @@ interface PelotonWorkout {
 
 const INSTRUCTORS = ['Matt Wilpers', 'Christine D’Ercole', 'Denis Morton', 'Olivia Amato'];
 
+const DISCIPLINE_MAP: Record<string, WorkoutInput['modality'] | undefined> = {
+  cycling: 'cycling',
+  running: 'running',
+  walking: 'walking',
+  strength: 'strength',
+  yoga: 'mobility',
+  stretching: 'mobility',
+  meditation: undefined, // real, but not training — it would distort load
+};
+
+// ---------------------------------------------------------------------------
+// Live: Peloton's private web API
+// ---------------------------------------------------------------------------
+
+const API_BASE = 'https://api.onepeloton.com';
+const PER_PAGE = 30;
+/** Metric fetches per batch. Their API is unpublished; do not hammer it. */
+const METRIC_CONCURRENCY = 4;
+
+interface LiveCursor {
+  userId: string;
+  page: number;
+  /** Stop paging once we reach rows older than the watermark. */
+  since: string;
+}
+
+interface WorkoutListResponse {
+  data: Partial<PelotonWorkout>[];
+  page_count?: number;
+  page?: number;
+}
+
+interface PerformanceGraph {
+  duration?: number;
+  summaries?: { slug: string; value: number | null }[];
+  average_summaries?: { slug: string; value: number | null }[];
+  metrics?: { slug: string; average_value?: number | null; max_value?: number | null }[];
+}
+
+/**
+ * Pages the workout list, then fills in metrics one workout at a time.
+ *
+ * The N+1 is theirs, not ours: the list endpoint returns no distance, calories
+ * or heart rate, and there is no bulk metrics endpoint. It is bounded by
+ * stopping as soon as a page runs past the watermark, so a routine incremental
+ * sync costs a handful of calls even though a first backfill costs one per
+ * workout.
+ */
+async function fetchLive(session: string, ctx: FetchContext): Promise<FetchPage> {
+  const headers = { Cookie: `peloton_session_id=${session}` };
+  const authHint = 'PELOTON_SESSION_ID is missing or the session has expired — log in again and copy a fresh cookie.';
+
+  const state: LiveCursor = ctx.cursor
+    ? (JSON.parse(ctx.cursor) as LiveCursor)
+    : { userId: await resolveUserId(headers, authHint), page: 0, since: ctx.since };
+
+  const list = (await apiFetch(
+    'peloton',
+    `${API_BASE}/api/user/${state.userId}/workouts?joins=ride&limit=${PER_PAGE}&page=${state.page}&sort_by=-created`,
+    { headers, authHint },
+  )) as WorkoutListResponse;
+
+  const rows = Array.isArray(list.data) ? list.data : [];
+  // Results come newest-first, so the watermark is a stopping condition rather
+  // than a filter — everything past the first old row is older still.
+  const fresh: Partial<PelotonWorkout>[] = [];
+  let reachedWatermark = false;
+  for (const w of rows) {
+    const day = w.start_time ? new Date(w.start_time * 1000).toISOString().slice(0, 10) : null;
+    if (day && day < state.since) {
+      reachedWatermark = true;
+      break;
+    }
+    fresh.push(w);
+  }
+
+  const records = await withMetrics(fresh, headers, authHint);
+
+  const morePages = list.page_count != null ? state.page + 1 < list.page_count : rows.length === PER_PAGE;
+  return {
+    records,
+    nextCursor:
+      reachedWatermark || !morePages
+        ? null
+        : JSON.stringify({ ...state, page: state.page + 1 } satisfies LiveCursor),
+  };
+}
+
+async function resolveUserId(headers: Record<string, string>, authHint: string): Promise<string> {
+  const me = (await apiFetch('peloton', `${API_BASE}/api/me`, { headers, authHint })) as { id?: string };
+  if (!me.id) throw new Error('peloton: /api/me returned no user id.');
+  return me.id;
+}
+
+/** Attaches a metrics_summary to each workout, so `normalize` is unchanged. */
+async function withMetrics(
+  workouts: Partial<PelotonWorkout>[],
+  headers: Record<string, string>,
+  authHint: string,
+): Promise<PelotonWorkout[]> {
+  const out: PelotonWorkout[] = [];
+
+  for (let i = 0; i < workouts.length; i += METRIC_CONCURRENCY) {
+    const slice = workouts.slice(i, i + METRIC_CONCURRENCY);
+    const filled = await Promise.all(
+      slice.map(async (w) => {
+        if (!w.id) return null;
+        let graph: PerformanceGraph = {};
+        try {
+          graph = (await apiFetch(
+            'peloton',
+            `${API_BASE}/api/workout/${w.id}/performance_graph?every_n=60`,
+            { headers, authHint },
+          )) as PerformanceGraph;
+        } catch {
+          // One unreadable ride shouldn't abort a backfill; it lands with the
+          // fields the list endpoint did give us and refreshes on a later sync.
+        }
+        return merge(w, graph);
+      }),
+    );
+    for (const f of filled) if (f) out.push(f);
+  }
+
+  return out;
+}
+
+function merge(w: Partial<PelotonWorkout>, graph: PerformanceGraph): PelotonWorkout {
+  const summary = (slug: string): number =>
+    Number(graph.summaries?.find((s) => s.slug === slug)?.value ?? 0);
+  const metric = (slug: string, key: 'average_value' | 'max_value'): number | undefined => {
+    const found = graph.metrics?.find((m) => m.slug === slug)?.[key];
+    return found == null ? undefined : Number(found);
+  };
+
+  const start = w.start_time ?? 0;
+  const end = w.end_time ?? start + (graph.duration ?? 0);
+
+  return {
+    id: String(w.id),
+    user_id: String(w.user_id ?? ''),
+    start_time: start,
+    end_time: end,
+    fitness_discipline: (w.fitness_discipline ?? 'cycling') as PelotonWorkout['fitness_discipline'],
+    status: (w.status ?? 'COMPLETE') as PelotonWorkout['status'],
+    // total_work is joules and is on the list row; the graph reports total
+    // output in kilojoules, so it is only a fallback and needs scaling.
+    total_work: w.total_work ?? summary('total_output') * 1000,
+    ride: {
+      id: String(w.ride?.id ?? ''),
+      title: w.ride?.title ?? 'Peloton workout',
+      duration: w.ride?.duration ?? graph.duration ?? end - start,
+      instructor_name: w.ride?.instructor_name ?? '',
+    },
+    metrics_summary: {
+      avg_output: metric('output', 'average_value') ?? 0,
+      max_output: metric('output', 'max_value') ?? 0,
+      avg_cadence: metric('cadence', 'average_value') ?? 0,
+      avg_heart_rate: metric('heart_rate', 'average_value'),
+      max_heart_rate: metric('heart_rate', 'max_value'),
+      avg_resistance: metric('resistance', 'average_value') ?? 0,
+      distance: summary('distance'), // miles, as the demo path also assumes
+      calories: summary('calories'),
+    },
+  };
+}
+
 export const peloton: Connector = {
   id: 'peloton',
   name: 'Peloton',
@@ -52,12 +218,14 @@ export const peloton: Connector = {
   domains: ['workouts'],
   authMode: 'token',
   credentialEnv: 'PELOTON_SESSION_ID',
+  liveVia: 'api',
   integrationNote:
-    'Live mode calls GET /api/user/{id}/workouts?joins=ride&limit=&page= with a peloton_session_id cookie, then GET /api/workout/{id}/performance_graph for metrics.',
+    'Peloton publishes no official API. Live mode uses the same private endpoints their web app calls — GET /api/user/{id}/workouts?joins=ride, then /api/workout/{id}/performance_graph — authenticated with a peloton_session_id cookie. Undocumented and unsupported: it can change without notice.',
   backfillDays: 400,
 
   async fetchPage(ctx: FetchContext): Promise<FetchPage> {
-    if (process.env.PELOTON_SESSION_ID) throw new NotConfiguredError('peloton', 'PELOTON_SESSION_ID');
+    const session = process.env.PELOTON_SESSION_ID;
+    if (session) return fetchLive(session, ctx);
 
     const window = pageWindow(ctx.since, ctx.cursor, PAGE_DAYS);
     await simulateCall('peloton', window, ctx.attempt);
@@ -117,20 +285,27 @@ export const peloton: Connector = {
       // which Peloton rounds aggressively on short rides.
       const avgWatts = durationS > 0 ? raw.total_work / durationS : m.avg_output;
 
+      // A real Peloton account is not only bikes — tread runs, strength and
+      // yoga classes all come back from the same endpoint.
+      const modality = DISCIPLINE_MAP[raw.fitness_discipline];
+      if (!modality) continue;
+
       workouts.push({
         externalId: raw.id,
         startUtc,
         day,
-        modality: 'cycling',
-        title: `${raw.ride.title} · ${raw.ride.instructor_name}`,
+        modality,
+        title: [raw.ride.title, raw.ride.instructor_name].filter(Boolean).join(' · '),
         durationS,
         distanceM: Math.round(m.distance * MILES_TO_M),
         avgHr: m.avg_heart_rate,
         maxHr: m.max_heart_rate,
         kcal: m.calories,
-        avgWatts: Math.round(avgWatts * 10) / 10,
-        normWatts: Math.round(avgWatts * 1.04 * 10) / 10,
-        spm: m.avg_cadence,
+        // Output is a bike concept; a tread class reports none, and writing a
+        // zero there would drag the power charts down with fake data points.
+        avgWatts: modality === 'cycling' && avgWatts > 0 ? Math.round(avgWatts * 10) / 10 : undefined,
+        normWatts: modality === 'cycling' && avgWatts > 0 ? Math.round(avgWatts * 1.04 * 10) / 10 : undefined,
+        spm: m.avg_cadence || undefined,
         load: Math.round((durationS / 60) * ((m.avg_heart_rate ?? 130) / 130) ** 2 * 10) / 10,
         raw,
       });

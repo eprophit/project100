@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { ImportPanel, type ImportRecord, type ImportableConnector } from './ImportPanel';
 import { Card, StatTile, StatusBadge } from '@/components/ui';
 import type { SourceRow, SyncRunRow } from '@/lib/types';
 
@@ -14,6 +15,8 @@ interface ConnectorMeta {
   integrationNote: string;
   backfillDays: number;
   mode: 'demo' | 'live';
+  liveVia: 'api' | 'file_import';
+  importCount: number;
 }
 
 type Run = SyncRunRow & { source_name: string };
@@ -52,11 +55,17 @@ export function ConnectionsClient({
   initialRuns,
   connectors,
   coverage,
+  importable,
+  imports,
+  importDirectory,
 }: {
   initialSources: SourceRow[];
   initialRuns: Run[];
   connectors: ConnectorMeta[];
   coverage: Record<string, CoverageRow | null>;
+  importable: ImportableConnector[];
+  imports: ImportRecord[];
+  importDirectory: string;
 }) {
   const [sources, setSources] = useState(initialSources);
   const [runs, setRuns] = useState(initialRuns);
@@ -82,6 +91,12 @@ export function ConnectionsClient({
     } finally {
       setBusy(null);
     }
+  }
+
+  async function refreshStatus() {
+    const status = await (await fetch('/api/sync')).json();
+    setSources(status.sources);
+    setRuns(status.runs);
   }
 
   const totalRows = Object.values(coverage).reduce((s, c) => s + (c?.n ?? 0), 0);
@@ -206,8 +221,24 @@ export function ConnectionsClient({
                       </td>
                     </tr>
                     <tr>
-                      <td className="muted">Auth</td>
-                      <td>{c.authMode.replace('_', ' ')}</td>
+                      <td className="muted">Real data via</td>
+                      <td>
+                        {c.liveVia === 'api' ? (
+                          <>
+                            API <span className="muted small">· {c.authMode.replace('_', ' ')}</span>
+                          </>
+                        ) : (
+                          <>
+                            File import
+                            <span className="muted small">
+                              {' '}
+                              · {c.importCount
+                                ? `${c.importCount} file${c.importCount === 1 ? '' : 's'} imported`
+                                : 'no vendor API — upload an export below'}
+                            </span>
+                          </>
+                        )}
+                      </td>
                     </tr>
                     <tr>
                       <td className="muted">Watermark</td>
@@ -239,6 +270,13 @@ export function ConnectionsClient({
             );
           })}
         </div>
+
+        <ImportPanel
+          connectors={importable}
+          directory={importDirectory}
+          initialImports={imports}
+          onChanged={() => void refreshStatus()}
+        />
 
         <Card title="Sync history" note="Every batch pull, with what it cost">
           <div className="scroll-x">

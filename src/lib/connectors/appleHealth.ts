@@ -1,7 +1,7 @@
+import { scanAppleExport } from '../imports/appleHealthXml';
 import { simDayMap } from '../sim/athlete';
 import { daysInWindow, pageWindow, simulateCall } from './transport';
 import {
-  NotConfiguredError,
   type BodyInput,
   type Connector,
   type FetchContext,
@@ -93,6 +93,24 @@ function parseHkDate(s: string): string {
   return `${date}T${time}.000Z`;
 }
 
+/**
+ * Which night a sleep segment belongs to.
+ *
+ * A night is named for the morning you wake up on, so a segment starting at
+ * 23:10 belongs to the *next* day. Keying on the segment's end instead is the
+ * obvious shortcut and it is wrong: the pre-midnight part of tonight's sleep
+ * ends today, so it lands on last night, dragging that night's bedtime and
+ * wake time a full day apart. The evening cutoff is what makes an afternoon nap
+ * stay on its own day while a 23:00 bedtime rolls forward.
+ */
+function nightKeyFor(startUtc: string): string {
+  const hour = Number(startUtc.slice(11, 13));
+  if (hour < 18) return startUtc.slice(0, 10);
+  const d = new Date(startUtc);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 export const appleHealth: Connector = {
   id: 'apple_health',
   name: 'Apple Health',
@@ -100,15 +118,27 @@ export const appleHealth: Connector = {
   domains: ['sleep', 'body', 'workouts'],
   authMode: 'file_export',
   credentialEnv: 'APPLE_HEALTH_EXPORT_DIR',
+  liveVia: 'file_import',
   integrationNote:
-    'Live mode watches a directory for export.xml / export.zip from Health → Export All Health Data, streams it with a SAX parser, and ingests records newer than the cursor.',
+    'HealthKit has no cloud API — data only leaves the phone as a file. Upload export.zip here, or set APPLE_HEALTH_EXPORT_DIR to a folder and every export dropped in it is ingested on the next sync.',
   backfillDays: 400,
 
-  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
-    if (process.env.APPLE_HEALTH_EXPORT_DIR) {
-      throw new NotConfiguredError('appleHealth', 'APPLE_HEALTH_EXPORT_DIR');
-    }
+  fileImport: {
+    instructions:
+      'On your iPhone: Health → your profile picture → Export All Health Data. Share the resulting export.zip to this machine and upload it here — no need to unzip it.',
+    accept: ['.zip', '.xml'],
+    matches(file) {
+      if (/^export.*\.(zip|xml)$/i.test(file.filename)) return true;
+      // A renamed file is still recognisable from its first bytes.
+      return file.head.includes('<HealthData') || file.head.includes('HKCharacteristicTypeIdentifier');
+    },
+    async parse(file) {
+      const { records } = await scanAppleExport(file.path, file.filename);
+      return normalizeAppleRecords(records);
+    },
+  },
 
+  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
     const window = pageWindow(ctx.since, ctx.cursor, PAGE_DAYS);
     await simulateCall('apple_health', window, ctx.attempt);
 
@@ -241,7 +271,16 @@ export const appleHealth: Connector = {
     return { records, nextCursor: window.nextCursor };
   },
 
-  normalize(records: unknown[]): NormalizedBatch {
+  normalize: normalizeAppleRecords,
+};
+
+/**
+ * Folds Apple's flat sample stream into domain records.
+ *
+ * Named rather than inline because both routes in — the demo/API page fetch and
+ * an uploaded export.xml — produce the same `HKRecord[]` and share this.
+ */
+function normalizeAppleRecords(records: unknown[]): NormalizedBatch {
     const sleepByNight = new Map<string, SleepInput & { _stages: Record<string, number> }>();
     const bodyByDay = new Map<string, BodyInput>();
     const workouts: WorkoutInput[] = [];
@@ -302,7 +341,15 @@ export const appleHealth: Connector = {
           avgHr,
           maxHr: Number(rec.metadata.HKMaximumHeartRate) || undefined,
           kcal: rec.totalEnergyBurned,
-          paceS: rec.metadata.HKAveragePace ? Number(rec.metadata.HKAveragePace) : undefined,
+          // Real exports carry no HKAveragePace — that metadata key is written
+          // by some third-party apps and by nothing else. Derive it from the
+          // distance instead, or every imported run would have a blank pace,
+          // which is the one number the running charts are built on.
+          paceS: rec.metadata.HKAveragePace
+            ? Number(rec.metadata.HKAveragePace)
+            : distanceM && distanceM > 0
+              ? Math.round((durationS / (distanceM / 1000)) * 10) / 10
+              : undefined,
           load: Math.round((durationS / 60) * ((avgHr ?? 120) / 130) ** 2 * 10) / 10,
           raw: rec,
           sets,
@@ -316,8 +363,7 @@ export const appleHealth: Connector = {
       switch (rec.type) {
         case 'HKCategoryTypeIdentifierSleepAnalysis': {
           const endUtc = parseHkDate(rec.endDate);
-          // A night is keyed to the day you wake up on, not the day you lay down.
-          const night = endUtc.slice(0, 10);
+          const night = nightKeyFor(startUtc);
           let entry = sleepByNight.get(night);
           if (!entry) {
             entry = { externalId: `sleep-${night}`, day: night, _stages: {} };
@@ -384,5 +430,4 @@ export const appleHealth: Connector = {
     });
 
     return { workouts, sleep, body };
-  },
-};
+}

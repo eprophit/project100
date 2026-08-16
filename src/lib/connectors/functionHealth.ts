@@ -1,7 +1,7 @@
+import { CsvTable, parseCsv, parseDayKey } from '../imports/csv';
 import { biomarkerPanels } from '../sim/athlete';
 import { pageWindow, simulateCall } from './transport';
 import {
-  NotConfiguredError,
   type BiomarkerInput,
   type Connector,
   type FetchContext,
@@ -46,15 +46,30 @@ export const functionHealth: Connector = {
   domains: ['biomarkers'],
   authMode: 'oauth',
   credentialEnv: 'FUNCTION_HEALTH_TOKEN',
+  liveVia: 'file_import',
   integrationNote:
-    'Live mode calls the Function Health member API for released panels and their biomarker results, filtered by collected_at.',
+    'Function Health publishes no member API, so panels arrive as a downloaded results file. Upload the CSV here, or set FUNCTION_HEALTH_TOKEN to a folder and results dropped there are ingested on the next sync.',
   backfillDays: 400,
 
-  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
-    if (process.env.FUNCTION_HEALTH_TOKEN) {
-      throw new NotConfiguredError('functionHealth', 'FUNCTION_HEALTH_TOKEN');
-    }
+  fileImport: {
+    instructions:
+      'In your Function Health dashboard, download your results as CSV (one row per biomarker) and upload it here. Panels are grouped by collection date automatically.',
+    accept: ['.csv'],
+    matches(file) {
+      if (!/\.csv$/i.test(file.filename)) return false;
+      const head = file.head.toLowerCase();
+      const looksLikeLabs =
+        head.includes('biomarker') || head.includes('marker') || head.includes('test name') ||
+        (head.includes('result') && head.includes('unit'));
+      // A food diary also has "unit"; the meal column is what separates them.
+      return looksLikeLabs && !head.includes('meal');
+    },
+    async parse(file) {
+      return { biomarkers: parseResultsCsv(await file.text()) };
+    },
+  },
 
+  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
     const window = pageWindow(ctx.since, ctx.cursor, PAGE_DAYS);
     await simulateCall('function_health', window, ctx.attempt);
 
@@ -113,6 +128,87 @@ export const functionHealth: Connector = {
     return { biomarkers };
   },
 };
+
+/**
+ * Parses a downloaded lab-results CSV into biomarkers.
+ *
+ * Lab exports are the least standardised file this app reads: the reference
+ * range may be two numeric columns or one string like "0.4 - 4.0", "<5" or
+ * "> 40". All three forms are handled, and a row whose range cannot be read
+ * still imports — it just has no range, which the UI already renders as a bare
+ * value rather than inventing bounds.
+ */
+export function parseResultsCsv(text: string): BiomarkerInput[] {
+  const table = new CsvTable(parseCsv(text));
+  const out: BiomarkerInput[] = [];
+  const seen = new Set<string>();
+
+  for (const row of table.rows) {
+    const day = parseDayKey(
+      table.cell(row, 'collectedon', 'collected', 'date', 'drawdate', 'resultdate', 'testdate'),
+    );
+    if (!day) continue;
+
+    const name = table.cell(row, 'biomarker', 'marker', 'testname', 'test', 'name', 'analyte');
+    if (!name) continue;
+
+    const value = table.num(row, 'value', 'result', 'yourresult', 'resultvalue');
+    if (value == null) continue;
+
+    const slug = slugify(name);
+    // A panel can list the same marker twice (a re-draw); keep the first.
+    const key = `${day}:${slug}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let refLow = table.num(row, 'referencelow', 'reflow', 'rangelow', 'low', 'min');
+    let refHigh = table.num(row, 'referencehigh', 'refhigh', 'rangehigh', 'high', 'max');
+    if (refLow == null && refHigh == null) {
+      const parsed = parseRange(table.cell(row, 'referencerange', 'range', 'normalrange'));
+      refLow = parsed.low;
+      refHigh = parsed.high;
+    }
+    const optimal = parseRange(table.cell(row, 'optimalrange', 'optimal'));
+
+    out.push({
+      externalId: `csv:${day}:${slug}`,
+      day,
+      panel: table.cell(row, 'panel', 'paneltype') || `Panel ${day}`,
+      category: table.cell(row, 'category', 'group', 'system') || 'Uncategorised',
+      name,
+      slug,
+      value,
+      unit: table.cell(row, 'unit', 'units', 'uom') || undefined,
+      refLow: refLow ?? null,
+      refHigh: refHigh ?? null,
+      optimalLow: optimal.low ?? null,
+      optimalHigh: optimal.high ?? null,
+    });
+  }
+
+  return out;
+}
+
+function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** Reads "0.4 - 4.0", "<5", "> 40", "0.4–4.0" into bounds. */
+function parseRange(raw: string): { low?: number; high?: number } {
+  const s = raw.trim();
+  if (!s) return {};
+
+  const between = /(-?[\d.]+)\s*(?:-|–|—|to)\s*(-?[\d.]+)/.exec(s);
+  if (between) return { low: Number(between[1]), high: Number(between[2]) };
+
+  const under = /^[<≤]\s*(-?[\d.]+)/.exec(s);
+  if (under) return { high: Number(under[1]) };
+
+  const over = /^[>≥]\s*(-?[\d.]+)/.exec(s);
+  if (over) return { low: Number(over[1]) };
+
+  return {};
+}
 
 /** Shared status rule so the UI and the LLM tools agree on what "optimal" means. */
 export function biomarkerStatus(m: {

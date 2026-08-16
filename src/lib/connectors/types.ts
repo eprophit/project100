@@ -170,6 +170,38 @@ export interface FetchPage {
   nextCursor: string | null;
 }
 
+/** A file staged for import, with its bytes still on disk. */
+export interface ImportFile {
+  /** Original filename, as uploaded or found in the watched directory. */
+  filename: string;
+  /** Absolute path to the staged copy. */
+  path: string;
+  size: number;
+  /** First few KiB, decoded — enough to sniff a format without reading it all. */
+  head: string;
+  /** Whole file as UTF-8. Guarded by size; do not call on an Apple export. */
+  text(): Promise<string>;
+}
+
+/**
+ * How a source that has no usable API gets real data in: you export a file from
+ * the vendor and hand it over.
+ *
+ * `parse` returns the same normalised batch a `fetchPage` + `normalize` pair
+ * would, so both routes land in the identical upsert and dedupe against each
+ * other. That is the point of the shape: importing an export twice, or on top
+ * of API-fetched rows, converges rather than duplicating.
+ */
+export interface FileImportSpec {
+  /** What to click in the vendor's app to produce this file. */
+  instructions: string;
+  /** Extensions offered by the upload control, e.g. ['.zip', '.xml']. */
+  accept: string[];
+  /** Cheap check: does this file plausibly belong to this source? */
+  matches(file: ImportFile): boolean;
+  parse(file: ImportFile): Promise<NormalizedBatch>;
+}
+
 export interface Connector {
   id: string;
   name: string;
@@ -179,10 +211,18 @@ export interface Connector {
   authMode: 'oauth' | 'token' | 'file_export';
   /** Env var that flips this connector from demo to live. */
   credentialEnv: string;
+  /**
+   * What live mode actually does for this source: call an API, or drain a
+   * directory of exported files. Four of the six vendors publish no usable API,
+   * so this is a real distinction rather than a nicety.
+   */
+  liveVia: 'api' | 'file_import';
   /** Human note about the real integration, shown in the UI. */
   integrationNote: string;
   /** How far back a first-ever sync should reach. */
   backfillDays: number;
+  /** Present when this source can ingest a vendor export. */
+  fileImport?: FileImportSpec;
 
   fetchPage(ctx: FetchContext): Promise<FetchPage>;
   normalize(records: unknown[]): NormalizedBatch;

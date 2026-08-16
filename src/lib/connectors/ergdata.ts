@@ -1,7 +1,7 @@
+import { today } from '../dates';
 import { simDayMap } from '../sim/athlete';
-import { daysInWindow, pageWindow, simulateCall } from './transport';
+import { apiFetch, daysInWindow, pageWindow, simulateCall } from './transport';
 import {
-  NotConfiguredError,
   type Connector,
   type FetchContext,
   type FetchPage,
@@ -47,6 +47,61 @@ interface ErgResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Live: Concept2 Logbook API
+// ---------------------------------------------------------------------------
+
+const API_BASE = 'https://log.concept2.com/api';
+const PER_PAGE = 50;
+
+/** Live cursor: the date window is fixed for the pass, the page number walks. */
+interface LiveCursor {
+  from: string;
+  to: string;
+  page: number;
+}
+
+interface LogbookResponse {
+  data: ErgResult[];
+  meta?: { pagination?: { current_page: number; total_pages: number } };
+}
+
+/**
+ * Pages the Logbook results endpoint.
+ *
+ * Unlike the demo transport, which walks a fixed number of days per page, this
+ * fixes the window for the whole pass and walks the API's own pagination — the
+ * upstream decides how much fits in a page, and asking it to re-slice by date
+ * would just make more round trips for the same rows.
+ */
+async function fetchLive(token: string, ctx: FetchContext): Promise<FetchPage> {
+  const state: LiveCursor = ctx.cursor
+    ? (JSON.parse(ctx.cursor) as LiveCursor)
+    : { from: ctx.since, to: today(), page: 1 };
+
+  const url =
+    `${API_BASE}/users/me/results` +
+    `?from=${state.from}&to=${state.to}&number=${PER_PAGE}&page=${state.page}`;
+
+  const body = (await apiFetch('ergdata', url, {
+    headers: { Authorization: `Bearer ${token}` },
+    authHint: 'ERGDATA_TOKEN is missing, expired, or lacks the results:read scope.',
+  })) as LogbookResponse;
+
+  const records = Array.isArray(body.data) ? body.data : [];
+  const pagination = body.meta?.pagination;
+  const hasMore = pagination
+    ? pagination.current_page < pagination.total_pages
+    : records.length === PER_PAGE; // no meta: keep going while pages come back full
+
+  return {
+    records,
+    nextCursor: hasMore
+      ? JSON.stringify({ ...state, page: state.page + 1 } satisfies LiveCursor)
+      : null,
+  };
+}
+
 function formatTenths(tenths: number): string {
   const total = tenths / 10;
   const m = Math.floor(total / 60);
@@ -61,12 +116,14 @@ export const ergdata: Connector = {
   domains: ['workouts'],
   authMode: 'oauth',
   credentialEnv: 'ERGDATA_TOKEN',
+  liveVia: 'api',
   integrationNote:
-    'Live mode calls GET /api/users/me/results with a Logbook OAuth token, paging on ?from=&to=&page=.',
+    'Live mode calls GET https://log.concept2.com/api/users/me/results with a Logbook OAuth bearer token, paging on ?from=&to=&page=. Set ERGDATA_TOKEN to a token with the results:read scope.',
   backfillDays: 400,
 
   async fetchPage(ctx: FetchContext): Promise<FetchPage> {
-    if (process.env.ERGDATA_TOKEN) throw new NotConfiguredError('ergdata', 'ERGDATA_TOKEN');
+    const token = process.env.ERGDATA_TOKEN;
+    if (token) return fetchLive(token, ctx);
 
     const window = pageWindow(ctx.since, ctx.cursor, PAGE_DAYS);
     await simulateCall('ergdata', window, ctx.attempt);
@@ -123,15 +180,21 @@ export const ergdata: Connector = {
       const day = raw.date.slice(0, 10);
       const startUtc = `${day}T${raw.date.slice(11)}.000Z`;
       const paceS = raw.distance > 0 ? (durationS / raw.distance) * 500 : undefined;
+      // `type` is the erg family, not the sport. A real logbook mixes them, so
+      // the demo's "everything is rowing" assumption does not survive live data.
+      // The SkiErg has no separate modality here and is closest to rowing in
+      // both movement pattern and how its load should count.
+      const modality = raw.type === 'bike' ? 'cycling' : 'rowing';
       // Concept2's own power relation, so watts match what the monitor showed.
-      const avgWatts = paceS ? 2.8 / (paceS / 500) ** 3 : undefined;
+      // It is calibrated for the rower and SkiErg; the BikeErg reports its own.
+      const avgWatts = paceS && modality === 'rowing' ? 2.8 / (paceS / 500) ** 3 : undefined;
       const avgHr = raw.heart_rate?.average;
 
       workouts.push({
         externalId: String(raw.id),
         startUtc,
         day,
-        modality: 'rowing',
+        modality,
         title: raw.comments ?? raw.workout_type,
         durationS,
         distanceM: raw.distance,

@@ -1,7 +1,7 @@
+import { CsvTable, parseCsv, parseDayKey } from '../imports/csv';
 import { simDayMap } from '../sim/athlete';
 import { daysInWindow, pageWindow, simulateCall } from './transport';
 import {
-  NotConfiguredError,
   type Connector,
   type FetchContext,
   type FetchPage,
@@ -29,13 +29,26 @@ export const hrv4training: Connector = {
   domains: ['recovery'],
   authMode: 'token',
   credentialEnv: 'HRV4TRAINING_TOKEN',
+  liveVia: 'file_import',
   integrationNote:
-    'Live mode pulls the CSV export from the HRV4Training API (or a scheduled email/Dropbox drop) and parses the same columns.',
+    'HRV4Training exports CSV rather than exposing a per-user API. Upload the export here, or point HRV4TRAINING_TOKEN at a folder (a Dropbox sync target works) and drops are ingested on the next sync.',
   backfillDays: 400,
 
-  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
-    if (process.env.HRV4TRAINING_TOKEN) throw new NotConfiguredError('hrv4training', 'HRV4TRAINING_TOKEN');
+  fileImport: {
+    instructions:
+      'In HRV4Training: Settings → Export data → email yourself the CSV. Upload it here; re-importing a longer export later updates the overlap rather than duplicating it.',
+    accept: ['.csv'],
+    matches(file) {
+      if (!/\.csv$/i.test(file.filename)) return false;
+      const head = file.head.toLowerCase();
+      return head.includes('rmssd') || head.includes('hrv4training');
+    },
+    async parse(file) {
+      return { recovery: parseExportCsv(await file.text()) };
+    },
+  },
 
+  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
     const window = pageWindow(ctx.since, ctx.cursor, PAGE_DAYS);
     await simulateCall('hrv4training', window, ctx.attempt);
 
@@ -109,3 +122,42 @@ export const hrv4training: Connector = {
     return { recovery };
   },
 };
+
+/**
+ * Parses a real HRV4Training CSV export.
+ *
+ * Kept separate from `normalize()` above, which reads the narrow fixed schema
+ * the demo transport emits. The shipping export is much wider and its column
+ * names have moved between app versions, so this matches them loosely and takes
+ * whatever it recognises.
+ */
+export function parseExportCsv(text: string): RecoveryInput[] {
+  const table = new CsvTable(parseCsv(text));
+  const out: RecoveryInput[] = [];
+
+  for (const row of table.rows) {
+    const day = parseDayKey(table.cell(row, 'date', 'day', 'timestamp'));
+    if (!day) continue;
+
+    const rmssd = table.num(row, 'rmssd', 'rmssdvalue', 'hrv');
+    const ln = table.num(row, 'lnrmssd', 'lnrmssdvalue');
+    // A row with neither is a day the user opened the app but did not measure.
+    if (rmssd == null && ln == null) continue;
+
+    const resolvedRmssd = rmssd ?? Math.round(Math.exp(ln as number) * 10) / 10;
+    const tags = table.cell(row, 'tags', 'tag');
+    const note = table.cell(row, 'note', 'notes', 'comment');
+
+    out.push({
+      externalId: `hrv-${day}`,
+      day,
+      hrvRmssd: resolvedRmssd,
+      hrvLn: ln ?? Math.round(Math.log(resolvedRmssd) * 100) / 100,
+      restingHr: table.num(row, 'hr', 'heartrate', 'restinghr'),
+      readiness: table.num(row, 'recoverypoints', 'readiness', 'recovery'),
+      note: [note, tags ? `tags: ${tags.replace(/;/g, ', ')}` : ''].filter(Boolean).join(' \u00b7 '),
+    });
+  }
+
+  return out;
+}

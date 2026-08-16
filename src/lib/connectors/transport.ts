@@ -94,6 +94,78 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ---------------------------------------------------------------------------
+// Live transport
+// ---------------------------------------------------------------------------
+
+/** Thrown for conditions no retry will fix: bad credentials, 404, 4xx. */
+export class UpstreamAuthError extends Error {
+  constructor(sourceId: string, status: number, hint: string) {
+    super(`${sourceId}: upstream returned ${status}. ${hint}`);
+    this.name = 'UpstreamAuthError';
+  }
+}
+
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+/**
+ * One HTTP call against a real vendor, with the status-code triage the retry
+ * loop above expects.
+ *
+ * The split that matters: 429 and 5xx become `TransientUpstreamError` and are
+ * retried with backoff, while 401/403 become `UpstreamAuthError` and are not —
+ * retrying an expired session cookie three times just delays telling the user
+ * to re-authenticate.
+ */
+export async function apiFetch(
+  sourceId: string,
+  url: string,
+  init: RequestInit & { authHint?: string } = {},
+): Promise<unknown> {
+  const { authHint, ...rest } = init;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...rest,
+      signal: controller.signal,
+      headers: { Accept: 'application/json', ...(rest.headers ?? {}) },
+    });
+  } catch (err) {
+    // Aborts, DNS failures and socket resets are all worth one more go.
+    const message = err instanceof Error ? err.message : String(err);
+    throw new TransientUpstreamError(`${sourceId}: ${message}`, 500);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 429) {
+    const retryAfter = Number(res.headers.get('retry-after'));
+    throw new TransientUpstreamError(
+      `${sourceId}: upstream returned 429 (rate limited)`,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000,
+    );
+  }
+  if (res.status >= 500) {
+    throw new TransientUpstreamError(`${sourceId}: upstream returned ${res.status}`, 500);
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new UpstreamAuthError(sourceId, res.status, authHint ?? 'Check the credential and try again.');
+  }
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    throw new Error(`${sourceId}: upstream returned ${res.status}. ${body}`);
+  }
+
+  try {
+    return await res.json();
+  } catch {
+    throw new Error(`${sourceId}: upstream returned ${res.status} with a body that is not JSON.`);
+  }
+}
+
 function hashString(s: string): number {
   let h = 2166136261 >>> 0;
   for (let i = 0; i < s.length; i++) {

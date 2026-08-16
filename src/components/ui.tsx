@@ -68,6 +68,7 @@ export function StatusBadge({ status }: { status: string | null }) {
     partial: { cls: 'badge-warning', icon: '◐', label: 'Partial' },
     error: { cls: 'badge-critical', icon: '▲', label: 'Error' },
     running: { cls: '', icon: '◌', label: 'Running' },
+    empty: { cls: 'badge-warning', icon: '◐', label: 'No rows' },
   };
   const s = map[status ?? ''] ?? { cls: '', icon: '·', label: status ?? 'Unknown' };
   return (

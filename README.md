@@ -32,12 +32,36 @@ Six connectors feed one normalised schema:
 
 | Source | Domains | Wire-format quirks the mapper absorbs |
 |---|---|---|
-| **Function Health** | biomarkers | Panel documents; status derived rather than trusted, since providers disagree on whether "optimal" is a subset of "in range" |
+| **Function Health** | biomarkers | Panel documents; status derived rather than trusted, since providers disagree on whether "optimal" is a subset of "in range". Real data arrives as a results CSV whose reference ranges may be two columns or one string (`0.4 - 4.0`, `<5`, `> 40`) |
 | **MyFitnessPal** | nutrition | One document per day with nested `meals[].entries[]` that carry no day of their own; nutrients stored *per serving* and multiplied by `servings`; several micronutrients reported as a **% of a daily value** rather than an amount; diary entries carry no weight, so they stay per-serving downstream |
-| **Apple Health** | sleep, body, workouts | Flat heterogeneous samples: sleep arrives as per-stage segments folded into one night keyed to the **wake** day; body-fat is a fraction, not a percentage; duration in minutes, distance in km; set-level lifting data only exists as a JSON string inside workout metadata |
-| **ErgData** (Concept2) | workouts | `time` in **tenths of a second**; naive local timestamps; splits carry `split_time`, not a pace |
+| **Apple Health** | sleep, body, workouts | Flat heterogeneous samples: sleep arrives as per-stage segments folded into one night keyed to the **wake** day; body-fat is a fraction, not a percentage; duration in minutes, distance in km; set-level lifting data only exists as a JSON string inside workout metadata. Real exports are a zip of a multi-hundred-MB XML dominated by heart-rate samples |
+| **ErgData** (Concept2) | workouts | `time` in **tenths of a second**; naive local timestamps; splits carry `split_time`, not a pace; `type` is the erg family (rower/bike/skierg), not the sport |
 | **Peloton** | workouts | Unix-second timestamps; `total_work` in **joules**; distance in **miles**; title on the nested `ride` |
 | **HRV4Training** | recovery | **CSV**, not JSON — the connector returns raw lines and parses them in `normalize()` |
+
+### Getting your own data in
+
+Every connector runs in **demo mode** until you configure it. What "configure" means depends on whether the vendor actually has an API, and only two of the six do:
+
+| Source | Route | Set |
+|---|---|---|
+| **Concept2 / ErgData** | Logbook OAuth API | `ERGDATA_TOKEN` |
+| **Peloton** | Their private web API — unofficial, undocumented, can break | `PELOTON_SESSION_ID` |
+| **Apple Health** | `export.zip` from Health → Export All Health Data | upload, or `APPLE_HEALTH_EXPORT_DIR` |
+| **MyFitnessPal** | Nutrition CSV export (their API is closed to new developers) | upload, or `MYFITNESSPAL_TOKEN` |
+| **Function Health** | Results CSV from the member dashboard | upload, or `FUNCTION_HEALTH_TOKEN` |
+| **HRV4Training** | CSV export | upload, or `HRV4TRAINING_TOKEN` |
+
+For the four with no API, **the Connections page has an upload box**. Drop the file in and the source is detected from its contents; you rarely need to say which vendor it came from. Setting the env var to a *folder path* instead makes that folder a drop target — every export left there is ingested on the next sync, so pointing it at a Dropbox or iCloud folder turns the vendor's own scheduled export into the integration.
+
+Imports end in the same `applyBatch` the API connectors use, which is what makes the awkward parts safe:
+
+- **Re-exporting an overlapping range is fine.** Rows are keyed on `(source_id, external_id)`, so a longer export updates the overlap instead of duplicating it. You never have to work out what you already have.
+- **A byte-identical file is detected and skipped** before it is parsed, so re-uploading costs nothing.
+- **One folder serves every source.** The drain detects each file's owner and leaves the others alone.
+- **Apple's XML is streamed, not loaded.** A real export is dominated by heart-rate samples this app has no use for; the scanner filters on the `type` attribute before parsing anything else, so memory tracks what is kept rather than the file size. On a 260 KB test export it keeps 392 of 1,392 elements, and the zip and the raw XML produce byte-identical output.
+
+Anything you have not configured stays in demo mode against the local fixture, so a half-connected install still renders.
 
 ### The engine is real; only the transport is simulated
 
@@ -123,6 +147,8 @@ src/
   lib/
     sim/athlete.ts        deterministic upstream (the "vendor servers")
     connectors/           six connectors + shared transport & types
+    imports/              file ingestion: zip reader, CSV, Apple XML scanner
+    sync/apply.ts         the upsert, shared by the API and file routes
     sync/engine.ts        paging, retry, dedupe, upsert, watermarks
     metrics.ts            metric catalog, smoothing, z-score, lag correlation
     nutrition.ts          nutrient vector, unit conversion, display metadata
@@ -149,6 +175,7 @@ scripts/
 - **Single user, no auth.** Everything is local to `data/vitalis.db`.
 - **Correlations are observational**, on one person, with training phase and season moving most signals together. The UI says so next to the numbers; treat a strong r as a prompt to investigate, not evidence of cause.
 - **Biomarker values are for tracking trends**, not diagnosis.
-- **Live connector branches are stubs.** Setting a credential switches the connector to live mode and it will tell you exactly which function to implement.
+- **The two live API clients are written but untested against the real services.** Concept2 and Peloton are implemented to their documented and observed shapes respectively; neither has been run against a real account, and Peloton's endpoints are unofficial and may change. The file-import path *is* tested, on exports shaped like the real ones.
+- **Forgetting an import does not delete its rows.** The schema carries no per-row provenance, and rows may since have been confirmed by a later export or an API sync, so unpicking them is not possible — and silently deleting a month of sleep because someone tidied a file list would be the worse failure.
 - **Nutrient figures are catalog references**, not assays of the item on your plate, and % RDI is a general adult reference rather than a target tuned to this training load.
 - **Sync is manual or on first boot** — there's no scheduler yet. The engine is written to be driven by one (`syncAll()` is a single call).

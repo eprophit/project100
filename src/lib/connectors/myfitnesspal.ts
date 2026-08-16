@@ -1,10 +1,11 @@
+import { CsvTable, parseCsv, parseDayKey } from '../imports/csv';
 import { simDayMap } from '../sim/athlete';
 import { daysInWindow, pageWindow, simulateCall } from './transport';
 import {
-  NotConfiguredError,
   type Connector,
   type FetchContext,
   type FetchPage,
+  type ImportFile,
   type NormalizedBatch,
   type NutritionInput,
 } from './types';
@@ -59,13 +60,28 @@ export const myfitnesspal: Connector = {
   domains: ['nutrition'],
   authMode: 'oauth',
   credentialEnv: 'MYFITNESSPAL_TOKEN',
+  liveVia: 'file_import',
   integrationNote:
-    'Live mode calls GET /v2/diary?entry_date__range={from}..{to} with a bearer token, one document per day.',
+    'The MyFitnessPal API is closed to new developers, so real data comes from their CSV export. Upload it here, or set MYFITNESSPAL_TOKEN to a folder path and exports dropped there are ingested on the next sync.',
   backfillDays: 400,
 
-  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
-    if (process.env.MYFITNESSPAL_TOKEN) throw new NotConfiguredError('myfitnesspal', 'MYFITNESSPAL_TOKEN');
+  fileImport: {
+    instructions:
+      'myfitnesspal.com → Settings → Export Data → request a "Nutrition" CSV for the date range you want. It arrives by email; upload the CSV here.',
+    accept: ['.csv'],
+    matches(file) {
+      const head = file.head.toLowerCase();
+      if (!/\.csv$/i.test(file.filename)) return false;
+      // Distinguish from the lab and HRV CSVs by the columns only a food diary
+      // has: a meal name alongside macros.
+      return head.includes('meal') && (head.includes('calorie') || head.includes('energy'));
+    },
+    async parse(file) {
+      return { nutrition: parseDiaryCsv(await file.text()) };
+    },
+  },
 
+  async fetchPage(ctx: FetchContext): Promise<FetchPage> {
     const window = pageWindow(ctx.since, ctx.cursor, PAGE_DAYS);
     await simulateCall('myfitnesspal', window, ctx.attempt);
 
@@ -161,6 +177,87 @@ export const myfitnesspal: Connector = {
     return { nutrition };
   },
 };
+
+/**
+ * Parses a MyFitnessPal "Nutrition" CSV export into diary entries.
+ *
+ * The export is one row per logged food with the totals already multiplied out,
+ * which is simpler than the API shape — but it still carries no serving weight,
+ * so entries land per-serving and stay un-convertible to grams, exactly as the
+ * API path does. Columns are matched loosely because MFP has renamed them
+ * across export versions and localises some of them.
+ */
+export function parseDiaryCsv(text: string): NutritionInput[] {
+  const table = new CsvTable(parseCsv(text));
+  const out: NutritionInput[] = [];
+  const perDay = new Map<string, number>();
+
+  for (const row of table.rows) {
+    const day = parseDayKey(table.cell(row, 'date', 'day'));
+    if (!day) continue;
+
+    const food = table.cell(row, 'food', 'foodname', 'item', 'description');
+    if (!food) continue;
+
+    const kcal = table.num(row, 'calories', 'energy', 'kcal') ?? 0;
+    const mealRaw = table.cell(row, 'meal', 'mealname') || 'snack';
+
+    // The export has no per-row id, so the natural key is position within the
+    // day. Stable as long as the same range is re-exported, which is what makes
+    // re-importing an overlapping export update rather than duplicate.
+    const n = (perDay.get(day) ?? 0) + 1;
+    perDay.set(day, n);
+
+    out.push({
+      externalId: `csv:${day}:${n}`,
+      day,
+      meal: normalizeMeal(mealRaw),
+      food,
+      brand: table.cell(row, 'brand') || undefined,
+      servings: 1,
+      servingG: null, // a diary row is a composite with no weight
+      kcal,
+      proteinG: table.num(row, 'protein') ?? 0,
+      carbsG: table.num(row, 'carbohydrates', 'carbs', 'carbohydrate') ?? 0,
+      fatG: table.num(row, 'fat', 'totalfat') ?? 0,
+      satFatG: table.num(row, 'saturatedfat'),
+      fiberG: table.num(row, 'fiber', 'fibre'),
+      sugarG: table.num(row, 'sugar', 'sugars'),
+      sodiumMg: table.num(row, 'sodium'),
+      potassiumMg: table.num(row, 'potassium'),
+      calciumMg: table.num(row, 'calcium'),
+      ironMg: table.num(row, 'iron'),
+      vitAMcg: table.num(row, 'vitamina'),
+      vitCMg: table.num(row, 'vitaminc'),
+      cholesterolMg: table.num(row, 'cholesterol'),
+      loggedAt: table.cell(row, 'time') ? `${day}T${padTime(table.cell(row, 'time'))}` : undefined,
+    });
+  }
+
+  return out;
+}
+
+const MEAL_ALIASES: Record<string, string> = {
+  breakfast: 'breakfast',
+  lunch: 'lunch',
+  dinner: 'dinner',
+  supper: 'dinner',
+  snack: 'snack',
+  snacks: 'snack',
+  'pre workout': 'intra',
+  'intra workout': 'intra',
+};
+
+function normalizeMeal(raw: string): string {
+  const key = raw.trim().toLowerCase();
+  return MEAL_ALIASES[key] ?? (key || 'snack');
+}
+
+function padTime(t: string): string {
+  const m = /^(\d{1,2}):(\d{2})/.exec(t.trim());
+  if (!m) return '12:00:00Z';
+  return `${m[1].padStart(2, '0')}:${m[2]}:00Z`;
+}
 
 function round1(v: number): number {
   return Math.round(v * 10) / 10;

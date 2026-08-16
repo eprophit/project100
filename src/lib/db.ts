@@ -348,6 +348,31 @@ CREATE TABLE IF NOT EXISTS biomarkers (
 );
 CREATE INDEX IF NOT EXISTS idx_biomarkers_slug ON biomarkers(slug, day);
 
+-- One row per file ingested through the import path (an Apple Health export,
+-- a MyFitnessPal CSV, a lab report). The sha256 is UNIQUE so re-uploading a
+-- byte-identical file is reported rather than reprocessed; a *newer* export
+-- that overlaps has a different hash, gets parsed, and dedupes at row level
+-- through the same (source_id, external_id) upsert every connector uses.
+CREATE TABLE IF NOT EXISTS imports (
+  id          TEXT PRIMARY KEY,
+  source_id   TEXT NOT NULL,
+  filename    TEXT NOT NULL,
+  stored_path TEXT,
+  bytes       INTEGER NOT NULL DEFAULT 0,
+  sha256      TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  status      TEXT NOT NULL,             -- ok | error
+  records     INTEGER NOT NULL DEFAULT 0,
+  inserted    INTEGER NOT NULL DEFAULT 0,
+  updated     INTEGER NOT NULL DEFAULT 0,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  first_day   TEXT,
+  last_day    TEXT,
+  error       TEXT,
+  UNIQUE(sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_imports_source ON imports(source_id, imported_at DESC);
+
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
