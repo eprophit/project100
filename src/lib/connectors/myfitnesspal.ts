@@ -32,9 +32,16 @@ interface MfpEntry {
     protein: number;
     carbohydrates: number;
     fat: number;
+    saturated_fat: number;
     fiber: number;
     sugar: number;
     sodium: number; // mg
+    potassium: number; // mg
+    calcium: number; // % of daily value, as MFP reports it
+    iron: number; // % of daily value
+    vitamin_a: number; // % of daily value
+    vitamin_c: number; // % of daily value
+    cholesterol: number; // mg
   };
   logged_at: string;
 }
@@ -83,9 +90,16 @@ export const myfitnesspal: Connector = {
             protein: n.protein / n.servings,
             carbohydrates: n.carbs / n.servings,
             fat: n.fat / n.servings,
+            saturated_fat: (n.fat * 0.31) / n.servings,
             fiber: n.fiber / n.servings,
             sugar: n.sugar / n.servings,
             sodium: n.sodium / n.servings,
+            potassium: (n.kcal * 0.52) / n.servings,
+            calcium: Math.round((n.kcal / 28) / n.servings),
+            iron: Math.round((n.kcal / 24) / n.servings),
+            vitamin_a: Math.round((n.kcal / 40) / n.servings),
+            vitamin_c: Math.round((n.kcal / 22) / n.servings),
+            cholesterol: (n.protein * 1.4) / n.servings,
           },
           logged_at: `${day}T12:00:00Z`,
         });
@@ -117,13 +131,27 @@ export const myfitnesspal: Connector = {
             food: entry.food.description,
             brand: entry.food.brand_name ?? undefined,
             servings: mult,
+            // MFP diary entries carry no weight — a "bowl" is not a number of
+            // grams — so downstream these stay per-serving and cannot be
+            // re-expressed in g or oz.
+            servingG: null,
             kcal: Math.round(n.energy.value * mult),
             proteinG: round1(n.protein * mult),
             carbsG: round1(n.carbohydrates * mult),
             fatG: round1(n.fat * mult),
+            satFatG: round1(n.saturated_fat * mult),
             fiberG: round1(n.fiber * mult),
             sugarG: round1(n.sugar * mult),
             sodiumMg: Math.round(n.sodium * mult),
+            potassiumMg: Math.round(n.potassium * mult),
+            // MFP reports these as a percentage of a daily value, not an
+            // absolute amount; convert back using the same reference values
+            // the app displays against.
+            calciumMg: Math.round(pctOfDv(n.calcium, 1000) * mult),
+            ironMg: round1(pctOfDv(n.iron, 8) * mult),
+            vitAMcg: Math.round(pctOfDv(n.vitamin_a, 900) * mult),
+            vitCMg: round1(pctOfDv(n.vitamin_c, 90) * mult),
+            cholesterolMg: Math.round(n.cholesterol * mult),
             loggedAt: entry.logged_at,
           });
         }
@@ -136,4 +164,9 @@ export const myfitnesspal: Connector = {
 
 function round1(v: number): number {
   return Math.round(v * 10) / 10;
+}
+
+/** MFP publishes several micronutrients as % of a daily value. */
+function pctOfDv(pct: number, dailyValue: number): number {
+  return (pct / 100) * dailyValue;
 }

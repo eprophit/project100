@@ -8,6 +8,15 @@ import { ensureReady } from '../src/lib/bootstrap.ts';
 import { all, one } from '../src/lib/db.ts';
 import { addDays, today } from '../src/lib/dates.ts';
 import { bestLag, getSeries } from '../src/lib/metrics.ts';
+import {
+  applyWeekTemplate,
+  clearLocalEntries,
+  entriesForDay,
+  listDayTemplates,
+  listMealTemplates,
+  listWeekTemplates,
+} from '../src/lib/mealPlans.ts';
+import { FACTOR_SQL, ZERO_NUTRIENTS, resolveNutrients, round } from '../src/lib/nutrition.ts';
 import { acwr, coverage, modalitySummaries, todayCard } from '../src/lib/queries.ts';
 import { syncAll } from '../src/lib/sync/engine.ts';
 
@@ -81,6 +90,69 @@ for (const d of trainingDays) {
   prevDay = d;
 }
 console.log(holes.length ? holes.map((h) => `  ${h}`).join('\n') : '  no training gap longer than 3 days');
+
+console.log('\n--- nutrition plan layer -------------------------------------');
+console.log(
+  `  library: ${listMealTemplates().length} meals, ${listDayTemplates().length} days, ${listWeekTemplates().length} weeks`,
+);
+
+// The SQL multiplier and its TypeScript twin must agree, or a day's totals in
+// the charts would disagree with the same day's totals in the meal list.
+const sqlTotals = all<{ id: string; kcal: number; protein: number }>(
+  `SELECT id, n_kcal * ${FACTOR_SQL} AS kcal, n_protein_g * ${FACTOR_SQL} AS protein
+   FROM nutrition_entries ORDER BY id LIMIT 500`,
+);
+const byId = new Map(sqlTotals.map((r) => [r.id, r]));
+const sampleDays = all<{ day: string }>(
+  'SELECT DISTINCT day FROM nutrition_entries ORDER BY day LIMIT 40',
+).map((r) => r.day);
+let compared = 0;
+let drift = 0;
+for (const d of sampleDays) {
+  for (const e of entriesForDay(d, false)) {
+    const sql = byId.get(e.id);
+    if (!sql) continue;
+    compared += 1;
+    if (Math.abs(sql.kcal - e.nutrients.kcal) > 0.01 || Math.abs(sql.protein - e.nutrients.protein_g) > 0.01) {
+      drift += 1;
+      if (drift <= 3) console.log(`  DRIFT ${e.id}: sql ${round(sql.kcal, 3)} vs ts ${e.nutrients.kcal} kcal`);
+    }
+  }
+}
+console.log(`  SQL vs TypeScript nutrient resolution: ${compared} entries compared, ${drift} disagreements`);
+
+// Unit conversion has to be lossless in both directions, or editing an amount
+// twice would quietly change what was eaten.
+const chickenPer100g = { ...ZERO_NUTRIENTS, kcal: 165, protein_g: 31 };
+const roundTrip = resolveNutrients({ quantity: 150, unit: 'g', basis: 'per_100g', serving_g: 150, base: chickenPer100g });
+const asOunces = resolveNutrients({
+  quantity: 150 / 28.349523125,
+  unit: 'oz',
+  basis: 'per_100g',
+  serving_g: 150,
+  base: chickenPer100g,
+});
+const asServings = resolveNutrients({ quantity: 1, unit: 'serving', basis: 'per_100g', serving_g: 150, base: chickenPer100g });
+const unitsAgree =
+  Math.abs(roundTrip.kcal - asServings.kcal) < 0.01 && Math.abs(roundTrip.kcal - asOunces.kcal) < 0.01;
+console.log(
+  `  150 g / 5.29 oz / 1 serving of the same food: ${roundTrip.kcal} · ${round(asOunces.kcal, 2)} · ` +
+    `${asServings.kcal} kcal (${unitsAgree ? 'agree' : 'DISAGREE'})`,
+);
+
+// Rolling a week template out and clearing it again must leave imported rows
+// untouched — that is the whole contract of `clearLocalEntries`.
+const week = listWeekTemplates()[0];
+if (week) {
+  const start = addDays(today(), 7);
+  const applied = applyWeekTemplate({ templateId: week.id, startDay: start, planned: true, replace: true });
+  const landed = entriesForDay(start, true).length;
+  let removed = 0;
+  for (let i = 0; i < 7; i++) removed += clearLocalEntries(addDays(start, i), true);
+  console.log(
+    `  "${week.name}" → ${applied.days} days / ${applied.entries} entries (${landed} on day 1), ${removed} cleared`,
+  );
+}
 
 const dupes = one<{ n: number }>(
   'SELECT COUNT(*) n FROM (SELECT source_id, external_id FROM workouts GROUP BY source_id, external_id HAVING COUNT(*) > 1)',

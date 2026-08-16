@@ -1,6 +1,7 @@
 import { all, one } from '../db';
 import { addDays, today, type DayKey } from '../dates';
 import { allMetrics, bestLag, correlate, getSeries, resolveMetric, smooth } from '../metrics';
+import { formatAmount } from '../nutrition';
 import {
   acwr,
   biomarkerDeltas,
@@ -350,18 +351,24 @@ function nutrition(input: Record<string, unknown>): ToolOutcome {
         day: d.day,
         totals: d.totals,
         targets: d.targets,
-        entries: d.logged.map((e) => ({
-          meal: e.meal,
-          food: e.food,
-          servings: e.servings,
-          kcal: e.kcal,
-          protein_g: e.protein_g,
-          carbs_g: e.carbs_g,
-          fat_g: e.fat_g,
+        // Grouped by meal, since "what did I have for lunch" is the question
+        // this shape usually has to answer.
+        meals: d.loggedMeals.map((m) => ({
+          meal: m.slot,
+          kcal: round(m.totals.kcal, 0),
+          protein_g: round(m.totals.protein_g),
+          items: m.entries.map((e) => ({
+            food: e.food,
+            amount: formatAmount(e.quantity, e.unit, e.serving_g),
+            kcal: round(e.nutrients.kcal, 0),
+            protein_g: round(e.nutrients.protein_g),
+            carbs_g: round(e.nutrients.carbs_g),
+            fat_g: round(e.nutrients.fat_g),
+          })),
         })),
         planned_totals: d.plannedTotals,
       },
-      summary: `nutrition ${d.day}: ${d.totals.kcal} kcal / ${d.totals.protein_g} g protein`,
+      summary: `nutrition ${d.day}: ${round(d.totals.kcal, 0)} kcal / ${round(d.totals.protein_g)} g protein`,
     };
   }
 
@@ -436,7 +443,7 @@ function recovery(input: Record<string, unknown>): ToolOutcome {
   };
 }
 
-function round(v: number, dp: number): number {
+function round(v: number, dp = 1): number {
   const f = 10 ** dp;
   return Math.round(v * f) / f;
 }

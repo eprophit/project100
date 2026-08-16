@@ -79,14 +79,31 @@ export interface NutritionInput {
   meal: string;
   food: string;
   brand?: string;
+  /** Number of servings logged. Upstream composites have no weight. */
   servings?: number;
+  /** Grams in one serving, when the provider knows it. */
+  servingG?: number | null;
+  /** Totals for the whole entry (already multiplied by servings). */
   kcal: number;
   proteinG: number;
   carbsG: number;
   fatG: number;
+  satFatG?: number;
   fiberG?: number;
   sugarG?: number;
   sodiumMg?: number;
+  potassiumMg?: number;
+  calciumMg?: number;
+  ironMg?: number;
+  magnesiumMg?: number;
+  zincMg?: number;
+  vitAMcg?: number;
+  vitCMg?: number;
+  vitDMcg?: number;
+  vitB12Mcg?: number;
+  folateMcg?: number;
+  cholesterolMg?: number;
+  omega3G?: number;
   loggedAt?: string;
 }
 

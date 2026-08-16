@@ -674,3 +674,131 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transpa
   .nav-group-label { display: none; }
   .main { padding: 20px 16px 60px; }
 }
+
+/* --- Nutrition ---------------------------------------------------------- */
+
+.banner {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  margin-bottom: 12px;
+}
+.banner-error {
+  color: var(--critical);
+  border-color: color-mix(in srgb, var(--critical) 40%, transparent);
+  background: color-mix(in srgb, var(--critical) 10%, var(--surface-1));
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text-primary);
+  font-weight: 550;
+  cursor: pointer;
+  text-align: left;
+}
+.link-btn:hover { color: var(--series-1); text-decoration: underline; }
+
+/* Seven-day strip above the meal list: click to jump, bar shows intake
+   against the daily energy target. */
+.week-strip {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.week-strip-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  cursor: pointer;
+  text-align: left;
+}
+.week-strip-cell:hover:not(:disabled) { background: var(--surface-2); }
+.week-strip-cell[aria-pressed='true'] {
+  border-color: var(--series-1);
+  background: color-mix(in srgb, var(--series-1) 10%, var(--surface-1));
+}
+.week-strip-dow { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.week-strip-kcal { font-size: 12.5px; color: var(--text-primary); }
+.week-strip-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+  display: block;
+}
+.week-strip-bar > span { display: block; height: 100%; }
+
+.meal-block { margin-bottom: 16px; }
+.meal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.meal-macros { font-size: 12px; margin-left: auto; }
+
+.amount-editor { display: inline-flex; gap: 4px; }
+.amount-editor input { width: 76px; }
+.amount-editor select { width: 72px; }
+
+tbody tr[aria-selected='true'] td {
+  background: color-mix(in srgb, var(--series-1) 10%, transparent);
+}
+
+.nutrient-group {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding-top: 12px;
+}
+
+.template-list { display: flex; flex-direction: column; gap: 2px; }
+.template-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.template-row:last-child { border-bottom: none; }
+.template-main { flex: 1; min-width: 0; }
+.template-macros { font-size: 12.5px; color: var(--text-primary); white-space: nowrap; }
+.template-items { margin-top: 6px; }
+.template-items td { padding: 3px 8px 3px 0; border-bottom: none; font-size: 12px; }
+
+.week-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 8px;
+}
+.week-cell {
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  min-width: 0;
+}
+.week-dow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.week-name {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

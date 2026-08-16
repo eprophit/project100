@@ -99,38 +99,8 @@ export interface RecoveryRow {
   note: string | null;
 }
 
-export interface NutritionEntry {
-  id: string;
-  day: DayKey;
-  meal: string;
-  food: string;
-  brand: string | null;
-  servings: number;
-  kcal: number;
-  protein_g: number;
-  carbs_g: number;
-  fat_g: number;
-  fiber_g: number;
-  sugar_g: number;
-  sodium_mg: number;
-  planned: number;
-}
-
-export interface Food {
-  id: string;
-  name: string;
-  brand: string | null;
-  serving: string;
-  serving_g: number | null;
-  kcal: number;
-  protein_g: number;
-  carbs_g: number;
-  fat_g: number;
-  fiber_g: number;
-  sugar_g: number;
-  sodium_mg: number;
-  tags: string | null;
-}
+// Food and nutrition-entry shapes live in `mealPlans`, next to the code that
+// resolves their per-100 g / per-serving snapshots into actual nutrients.
 
 export interface Supplement {
   id: string;

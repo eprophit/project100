@@ -1,7 +1,9 @@
 import { all, getJsonSetting, one } from './db';
 import { addDays, today, type DayKey } from './dates';
+import { entriesForDay, groupIntoMeals } from './mealPlans';
 import { getSeries } from './metrics';
-import { DEFAULT_TARGETS, type Biomarker, type Food, type MacroTargets, type NutritionEntry, type Supplement, type SyncRunRow, type Workout } from './types';
+import { FACTOR_SQL, sumNutrients } from './nutrition';
+import { DEFAULT_TARGETS, type Biomarker, type MacroTargets, type Supplement, type SyncRunRow, type Workout } from './types';
 
 // ---------------------------------------------------------------------------
 // Dashboard
@@ -35,7 +37,8 @@ export function todayCard(day: DayKey = today()): TodayCard {
   );
   const sleep = one<{ v: number }>('SELECT total_min AS v FROM sleep WHERE day = ?', [day]);
   const nut = one<{ kcal: number; protein: number }>(
-    'SELECT SUM(kcal) AS kcal, SUM(protein_g) AS protein FROM nutrition_entries WHERE day = ? AND planned = 0',
+    `SELECT SUM(n_kcal * ${FACTOR_SQL}) AS kcal, SUM(n_protein_g * ${FACTOR_SQL}) AS protein
+     FROM nutrition_entries WHERE day = ? AND planned = 0`,
     [day],
   );
   const body = one<{ v: number }>('SELECT weight_kg AS v FROM body_metrics WHERE day = ?', [day]);
@@ -224,47 +227,38 @@ export function getTargets(): MacroTargets {
   return getJsonSetting<MacroTargets>('targets', DEFAULT_TARGETS);
 }
 
+/**
+ * A day's food log and plan, grouped into meals with per-meal totals.
+ *
+ * The nutrient arithmetic lives in `mealPlans`, which resolves each entry's
+ * stored basis and quantity into actual nutrients. This function is only the
+ * page-level assembly: log, plan, totals, targets.
+ */
 export function nutritionDay(day: DayKey) {
-  const logged = all<NutritionEntry>(
-    'SELECT * FROM nutrition_entries WHERE day = ? AND planned = 0 ORDER BY meal, id',
-    [day],
-  );
-  const planned = all<NutritionEntry>(
-    'SELECT * FROM nutrition_entries WHERE day = ? AND planned = 1 ORDER BY meal, id',
-    [day],
-  );
-  return { day, logged, planned, totals: sumEntries(logged), plannedTotals: sumEntries(planned), targets: getTargets() };
-}
-
-export function sumEntries(entries: NutritionEntry[]) {
-  return entries.reduce(
-    (acc, e) => ({
-      kcal: acc.kcal + e.kcal,
-      protein_g: Math.round((acc.protein_g + e.protein_g) * 10) / 10,
-      carbs_g: Math.round((acc.carbs_g + e.carbs_g) * 10) / 10,
-      fat_g: Math.round((acc.fat_g + e.fat_g) * 10) / 10,
-      fiber_g: Math.round((acc.fiber_g + e.fiber_g) * 10) / 10,
-      sodium_mg: acc.sodium_mg + e.sodium_mg,
-    }),
-    { kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0, sodium_mg: 0 },
-  );
-}
-
-export function searchFoods(q: string, limit = 30): Food[] {
-  if (!q.trim()) return all<Food>('SELECT * FROM foods ORDER BY name LIMIT ?', [limit]);
-  return all<Food>('SELECT * FROM foods WHERE name LIKE ? OR tags LIKE ? ORDER BY name LIMIT ?', [
-    `%${q}%`,
-    `%${q}%`,
-    limit,
-  ]);
+  const logged = entriesForDay(day, false);
+  const planned = entriesForDay(day, true);
+  return {
+    day,
+    logged,
+    planned,
+    loggedMeals: groupIntoMeals(logged),
+    plannedMeals: groupIntoMeals(planned),
+    totals: sumNutrients(logged.map((e) => e.nutrients)),
+    plannedTotals: sumNutrients(planned.map((e) => e.nutrients)),
+    targets: getTargets(),
+  };
 }
 
 /** Rolling adherence to macro targets over a window. */
 export function nutritionAdherence(from: DayKey, to: DayKey) {
   const targets = getTargets();
   const rows = all<{ day: string; kcal: number; protein: number; carbs: number; fat: number; fiber: number }>(
-    `SELECT day, SUM(kcal) kcal, SUM(protein_g) protein, SUM(carbs_g) carbs,
-            SUM(fat_g) fat, SUM(fiber_g) fiber
+    `SELECT day,
+            SUM(n_kcal * ${FACTOR_SQL})      AS kcal,
+            SUM(n_protein_g * ${FACTOR_SQL}) AS protein,
+            SUM(n_carbs_g * ${FACTOR_SQL})   AS carbs,
+            SUM(n_fat_g * ${FACTOR_SQL})     AS fat,
+            SUM(n_fiber_g * ${FACTOR_SQL})   AS fiber
      FROM nutrition_entries WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day ORDER BY day`,
     [from, to],
   );

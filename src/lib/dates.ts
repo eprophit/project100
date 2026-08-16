@@ -37,6 +37,9 @@ export function daysAgo(n: number, from: DayKey = today()): DayKey {
   return addDays(from, -n);
 }
 
+/** Index 0 = Monday, matching `weekStart`. */
+export const DOW_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
 export function weekStart(day: DayKey): DayKey {
   const d = new Date(`${day}T00:00:00Z`);
   const dow = (d.getUTCDay() + 6) % 7; // Monday = 0

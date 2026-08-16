@@ -149,42 +149,141 @@ CREATE TABLE IF NOT EXISTS protocols (
 );
 CREATE INDEX IF NOT EXISTS idx_protocols_day ON protocols(day, kind);
 
+-- Nutrients are stored PER 100 G. That is what makes grams, ounces and
+-- servings interchangeable at the UI layer — a serving is just a named weight.
 CREATE TABLE IF NOT EXISTS foods (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL,
-  brand      TEXT,
-  serving    TEXT NOT NULL,
-  serving_g  REAL,
-  kcal       REAL NOT NULL,
-  protein_g  REAL NOT NULL DEFAULT 0,
-  carbs_g    REAL NOT NULL DEFAULT 0,
-  fat_g      REAL NOT NULL DEFAULT 0,
-  fiber_g    REAL NOT NULL DEFAULT 0,
-  sugar_g    REAL NOT NULL DEFAULT 0,
-  sodium_mg  REAL NOT NULL DEFAULT 0,
-  tags       TEXT
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  brand          TEXT,
+  serving_label  TEXT NOT NULL,          -- how one serving is described
+  serving_g      REAL,                   -- grams in one serving
+  origin         TEXT NOT NULL DEFAULT 'catalog',  -- catalog | custom | imported
+  kcal           REAL NOT NULL DEFAULT 0,
+  protein_g      REAL NOT NULL DEFAULT 0,
+  carbs_g        REAL NOT NULL DEFAULT 0,
+  fat_g          REAL NOT NULL DEFAULT 0,
+  sat_fat_g      REAL NOT NULL DEFAULT 0,
+  fiber_g        REAL NOT NULL DEFAULT 0,
+  sugar_g        REAL NOT NULL DEFAULT 0,
+  sodium_mg      REAL NOT NULL DEFAULT 0,
+  potassium_mg   REAL NOT NULL DEFAULT 0,
+  calcium_mg     REAL NOT NULL DEFAULT 0,
+  iron_mg        REAL NOT NULL DEFAULT 0,
+  magnesium_mg   REAL NOT NULL DEFAULT 0,
+  zinc_mg        REAL NOT NULL DEFAULT 0,
+  vit_a_mcg      REAL NOT NULL DEFAULT 0,
+  vit_c_mg       REAL NOT NULL DEFAULT 0,
+  vit_d_mcg      REAL NOT NULL DEFAULT 0,
+  vit_b12_mcg    REAL NOT NULL DEFAULT 0,
+  folate_mcg     REAL NOT NULL DEFAULT 0,
+  cholesterol_mg REAL NOT NULL DEFAULT 0,
+  omega3_g       REAL NOT NULL DEFAULT 0,
+  tags           TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_foods_name ON foods(name);
 
+-- ---------------------------------------------------------------------------
+-- Reusable building blocks: item → meal → day → week.
+--
+-- A saved day references saved meals rather than copying their items, so
+-- editing a meal template updates every day that uses it. Applying a template
+-- to a date is the opposite: it materialises concrete entries, which are then
+-- free to diverge from the template.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS meal_templates (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  slot       TEXT NOT NULL DEFAULT 'breakfast',
+  notes      TEXT,
+  tags       TEXT,
+  created_at TEXT NOT NULL,
+  used_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS meal_template_items (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES meal_templates(id) ON DELETE CASCADE,
+  position    INTEGER NOT NULL DEFAULT 0,
+  food_id     TEXT,
+  food        TEXT NOT NULL,
+  brand       TEXT,
+  quantity    REAL NOT NULL DEFAULT 1,
+  unit        TEXT NOT NULL DEFAULT 'serving',
+  basis       TEXT NOT NULL DEFAULT 'per_serving',
+  serving_g   REAL,
+  n_kcal REAL DEFAULT 0, n_protein_g REAL DEFAULT 0, n_carbs_g REAL DEFAULT 0,
+  n_fat_g REAL DEFAULT 0, n_sat_fat_g REAL DEFAULT 0, n_fiber_g REAL DEFAULT 0,
+  n_sugar_g REAL DEFAULT 0, n_sodium_mg REAL DEFAULT 0, n_potassium_mg REAL DEFAULT 0,
+  n_calcium_mg REAL DEFAULT 0, n_iron_mg REAL DEFAULT 0, n_magnesium_mg REAL DEFAULT 0,
+  n_zinc_mg REAL DEFAULT 0, n_vit_a_mcg REAL DEFAULT 0, n_vit_c_mg REAL DEFAULT 0,
+  n_vit_d_mcg REAL DEFAULT 0, n_vit_b12_mcg REAL DEFAULT 0, n_folate_mcg REAL DEFAULT 0,
+  n_cholesterol_mg REAL DEFAULT 0, n_omega3_g REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_meal_items ON meal_template_items(template_id, position);
+
+CREATE TABLE IF NOT EXISTS day_templates (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  notes      TEXT,
+  tags       TEXT,
+  created_at TEXT NOT NULL,
+  used_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS day_template_meals (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  day_template_id  TEXT NOT NULL REFERENCES day_templates(id) ON DELETE CASCADE,
+  meal_template_id TEXT NOT NULL REFERENCES meal_templates(id) ON DELETE CASCADE,
+  slot             TEXT NOT NULL,
+  position         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_day_meals ON day_template_meals(day_template_id, position);
+
+CREATE TABLE IF NOT EXISTS week_templates (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  notes      TEXT,
+  created_at TEXT NOT NULL,
+  used_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS week_template_days (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  week_template_id TEXT NOT NULL REFERENCES week_templates(id) ON DELETE CASCADE,
+  dow              INTEGER NOT NULL,     -- 0 = Monday
+  day_template_id  TEXT REFERENCES day_templates(id) ON DELETE CASCADE,
+  UNIQUE(week_template_id, dow)
+);
+
 -- planned = 1 rows are the meal planner; planned = 0 rows are the food log.
 -- Same table so "did I eat what I planned?" is one query.
+--
+-- Each row carries its own nutrient snapshot (the n_* columns) so that editing
+-- the catalog later never silently rewrites history. the basis column says how to read
+-- that snapshot: per 100 g for anything with a known weight, per serving for
+-- upstream composites like a MyFitnessPal bowl that have no weight at all.
 CREATE TABLE IF NOT EXISTS nutrition_entries (
   id          TEXT PRIMARY KEY,
   source_id   TEXT NOT NULL,
   external_id TEXT NOT NULL,
   day         TEXT NOT NULL,
   meal        TEXT NOT NULL,            -- breakfast | lunch | dinner | snack | intra
+  position    INTEGER NOT NULL DEFAULT 0,
   food_id     TEXT,
   food        TEXT NOT NULL,
   brand       TEXT,
-  servings    REAL NOT NULL DEFAULT 1,
-  kcal        REAL NOT NULL DEFAULT 0,
-  protein_g   REAL NOT NULL DEFAULT 0,
-  carbs_g     REAL NOT NULL DEFAULT 0,
-  fat_g       REAL NOT NULL DEFAULT 0,
-  fiber_g     REAL NOT NULL DEFAULT 0,
-  sugar_g     REAL NOT NULL DEFAULT 0,
-  sodium_mg   REAL NOT NULL DEFAULT 0,
+  quantity    REAL NOT NULL DEFAULT 1,
+  unit        TEXT NOT NULL DEFAULT 'serving',   -- g | oz | serving
+  basis       TEXT NOT NULL DEFAULT 'per_serving',
+  serving_g   REAL,
+  n_kcal REAL DEFAULT 0, n_protein_g REAL DEFAULT 0, n_carbs_g REAL DEFAULT 0,
+  n_fat_g REAL DEFAULT 0, n_sat_fat_g REAL DEFAULT 0, n_fiber_g REAL DEFAULT 0,
+  n_sugar_g REAL DEFAULT 0, n_sodium_mg REAL DEFAULT 0, n_potassium_mg REAL DEFAULT 0,
+  n_calcium_mg REAL DEFAULT 0, n_iron_mg REAL DEFAULT 0, n_magnesium_mg REAL DEFAULT 0,
+  n_zinc_mg REAL DEFAULT 0, n_vit_a_mcg REAL DEFAULT 0, n_vit_c_mg REAL DEFAULT 0,
+  n_vit_d_mcg REAL DEFAULT 0, n_vit_b12_mcg REAL DEFAULT 0, n_folate_mcg REAL DEFAULT 0,
+  n_cholesterol_mg REAL DEFAULT 0, n_omega3_g REAL DEFAULT 0,
   planned     INTEGER NOT NULL DEFAULT 0,
   logged_at   TEXT,
   UNIQUE(source_id, external_id)
@@ -283,9 +382,50 @@ export function getDb(): DatabaseSync {
   fs.mkdirSync(path.dirname(file), { recursive: true });
 
   const db = new DatabaseSync(file);
+  migrateLegacy(db);
   db.exec(SCHEMA);
   globalThis.__vitalisDb = db;
   return db;
+}
+
+/**
+ * Drops nutrition tables left over from the per-serving schema so the DDL below
+ * can recreate them in their per-100-g form.
+ *
+ * Rebuilding rather than back-filling columns is the right trade here: the old
+ * rows have no weights, so there is nothing to convert them *from*, and every
+ * row is reproducible — the catalog is re-seeded and the food log is re-pulled
+ * from the connector once its watermark is cleared.
+ */
+function migrateLegacy(db: DatabaseSync): void {
+  const columns = (table: string): string[] => {
+    try {
+      return (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    } catch {
+      return [];
+    }
+  };
+
+  const foodCols = columns('foods');
+  if (foodCols.length && !foodCols.includes('serving_label')) {
+    db.exec('DROP TABLE IF EXISTS foods');
+  }
+
+  const entryCols = columns('nutrition_entries');
+  if (entryCols.length && !entryCols.includes('basis')) {
+    db.exec('DROP TABLE IF EXISTS nutrition_entries');
+    // Clear the watermark so the next sync re-pulls the whole food log.
+    try {
+      db.prepare("UPDATE sources SET cursor = NULL WHERE id = 'myfitnesspal'").run();
+    } catch {
+      /* sources table may not exist yet on a fresh database */
+    }
+    try {
+      db.prepare("DELETE FROM settings WHERE key = 'seed_version'").run();
+    } catch {
+      /* likewise */
+    }
+  }
 }
 
 /**
@@ -315,17 +455,33 @@ export function run(sql: string, params: unknown[] = []): void {
   stmt.run(...(params as never[]));
 }
 
-/** Wraps `fn` in a transaction; rolls back and rethrows on error. */
+/**
+ * Wraps `fn` in a transaction; rolls back and rethrows on error.
+ *
+ * Re-entrant, via savepoints. SQLite rejects a nested BEGIN, and the plan layer
+ * genuinely nests — applying a week template calls into the day and meal
+ * appliers, each of which is atomic in its own right. Savepoints let an inner
+ * failure unwind just its own work while the outer transaction decides what to
+ * do, and keep the whole rollout all-or-nothing at the top.
+ */
+let txDepth = 0;
+
 export function tx<T>(fn: () => T): T {
   const db = getDb();
-  db.exec('BEGIN');
+  const nested = txDepth > 0;
+  const name = `sp_${txDepth}`;
+
+  db.exec(nested ? `SAVEPOINT ${name}` : 'BEGIN');
+  txDepth += 1;
   try {
     const result = fn();
-    db.exec('COMMIT');
+    db.exec(nested ? `RELEASE ${name}` : 'COMMIT');
     return result;
   } catch (err) {
-    db.exec('ROLLBACK');
+    db.exec(nested ? `ROLLBACK TO ${name}; RELEASE ${name}` : 'ROLLBACK');
     throw err;
+  } finally {
+    txDepth -= 1;
   }
 }
 

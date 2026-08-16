@@ -304,18 +304,49 @@ function applyBatch(sourceId: string, batch: NormalizedBatch, counters: Counters
     for (const n of batch.nutrition ?? []) {
       const id = `${sourceId}:${n.externalId}`;
       const existed = exists('nutrition_entries', id);
+      const servings = n.servings ?? 1;
+      const servingG = n.servingG ?? null;
+
+      // Totals arrive already multiplied by servings. Store the snapshot on the
+      // basis the provider can actually support: per 100 g when it told us what
+      // a serving weighs, otherwise per serving.
+      const perServing = (v: number | undefined) => (servings > 0 ? (v ?? 0) / servings : (v ?? 0));
+      const basis = servingG && servingG > 0 ? 'per_100g' : 'per_serving';
+      const factor = basis === 'per_100g' ? 100 / (servingG as number) : 1;
+      const base = (v: number | undefined) => round4(perServing(v) * factor);
+
       run(
         `INSERT INTO nutrition_entries (id, source_id, external_id, day, meal, food, brand,
-            servings, kcal, protein_g, carbs_g, fat_g, fiber_g, sugar_g, sodium_mg, planned, logged_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)
+            quantity, unit, basis, serving_g,
+            n_kcal, n_protein_g, n_carbs_g, n_fat_g, n_sat_fat_g, n_fiber_g, n_sugar_g,
+            n_sodium_mg, n_potassium_mg, n_calcium_mg, n_iron_mg, n_magnesium_mg, n_zinc_mg,
+            n_vit_a_mcg, n_vit_c_mg, n_vit_d_mcg, n_vit_b12_mcg, n_folate_mcg,
+            n_cholesterol_mg, n_omega3_g, planned, logged_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)
          ON CONFLICT(source_id, external_id) DO UPDATE SET
            day=excluded.day, meal=excluded.meal, food=excluded.food, brand=excluded.brand,
-           servings=excluded.servings, kcal=excluded.kcal, protein_g=excluded.protein_g,
-           carbs_g=excluded.carbs_g, fat_g=excluded.fat_g, fiber_g=excluded.fiber_g,
-           sugar_g=excluded.sugar_g, sodium_mg=excluded.sodium_mg, logged_at=excluded.logged_at`,
+           quantity=excluded.quantity, unit=excluded.unit, basis=excluded.basis,
+           serving_g=excluded.serving_g,
+           n_kcal=excluded.n_kcal, n_protein_g=excluded.n_protein_g, n_carbs_g=excluded.n_carbs_g,
+           n_fat_g=excluded.n_fat_g, n_sat_fat_g=excluded.n_sat_fat_g, n_fiber_g=excluded.n_fiber_g,
+           n_sugar_g=excluded.n_sugar_g, n_sodium_mg=excluded.n_sodium_mg,
+           n_potassium_mg=excluded.n_potassium_mg, n_calcium_mg=excluded.n_calcium_mg,
+           n_iron_mg=excluded.n_iron_mg, n_magnesium_mg=excluded.n_magnesium_mg,
+           n_zinc_mg=excluded.n_zinc_mg, n_vit_a_mcg=excluded.n_vit_a_mcg,
+           n_vit_c_mg=excluded.n_vit_c_mg, n_vit_d_mcg=excluded.n_vit_d_mcg,
+           n_vit_b12_mcg=excluded.n_vit_b12_mcg, n_folate_mcg=excluded.n_folate_mcg,
+           n_cholesterol_mg=excluded.n_cholesterol_mg, n_omega3_g=excluded.n_omega3_g,
+           logged_at=excluded.logged_at`,
         [
-          id, sourceId, n.externalId, n.day, n.meal, n.food, n.brand ?? null, n.servings ?? 1,
-          n.kcal, n.proteinG, n.carbsG, n.fatG, n.fiberG ?? 0, n.sugarG ?? 0, n.sodiumMg ?? 0,
+          id, sourceId, n.externalId, n.day, n.meal, n.food, n.brand ?? null,
+          basis === 'per_100g' ? servings * (servingG as number) : servings,
+          basis === 'per_100g' ? 'g' : 'serving',
+          basis, servingG,
+          base(n.kcal), base(n.proteinG), base(n.carbsG), base(n.fatG), base(n.satFatG),
+          base(n.fiberG), base(n.sugarG), base(n.sodiumMg), base(n.potassiumMg),
+          base(n.calciumMg), base(n.ironMg), base(n.magnesiumMg), base(n.zincMg),
+          base(n.vitAMcg), base(n.vitCMg), base(n.vitDMcg), base(n.vitB12Mcg),
+          base(n.folateMcg), base(n.cholesterolMg), base(n.omega3G),
           n.loggedAt ?? null,
         ],
       );
@@ -389,6 +420,10 @@ function applyBatch(sourceId: string, batch: NormalizedBatch, counters: Counters
 
 function exists(table: string, id: string): boolean {
   return one<{ n: number }>(`SELECT 1 AS n FROM ${table} WHERE id = ?`, [id]) !== null;
+}
+
+function round4(v: number): number {
+  return Math.round(v * 10_000) / 10_000;
 }
 
 function bump(counters: Counters, existed: boolean): void {

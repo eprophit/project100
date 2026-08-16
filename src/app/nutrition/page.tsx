@@ -1,11 +1,20 @@
 import { NutritionClient } from './NutritionClient';
+import type { NutritionPayload } from './payload';
 import { ChartLegend, OverlayChart } from '@/components/charts';
-import { SERIES_COLORS } from '@/lib/palette';
 import { Card, StatTile } from '@/components/ui';
 import { ensureReady } from '@/lib/bootstrap';
-import { addDays, today } from '@/lib/dates';
+import { addDays, today, weekStart } from '@/lib/dates';
+import {
+  entriesForDay,
+  groupIntoMeals,
+  listDayTemplates,
+  listMealTemplates,
+  listWeekTemplates,
+} from '@/lib/mealPlans';
 import { getSeries } from '@/lib/metrics';
-import { nutritionAdherence, nutritionDay, searchFoods } from '@/lib/queries';
+import { sumNutrients } from '@/lib/nutrition';
+import { SERIES_COLORS } from '@/lib/palette';
+import { getTargets, nutritionAdherence } from '@/lib/queries';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,10 +23,28 @@ export default async function NutritionPage() {
 
   const day = today();
   const from = addDays(day, -29);
-  const initial = nutritionDay(day);
-  const foods = searchFoods('', 200);
-  const adherence = nutritionAdherence(from, day);
+  const start = weekStart(day);
+  const entries = entriesForDay(day, false);
 
+  // Same shape the API returns, so the first paint and every subsequent
+  // mutation response go through identical code paths on the client.
+  const initial: NutritionPayload = {
+    day,
+    weekStart: start,
+    planned: false,
+    entries,
+    meals: groupIntoMeals(entries),
+    totals: sumNutrients(entries.map((e) => e.nutrients)),
+    targets: getTargets(),
+    week: Array.from({ length: 7 }, (_, i) => {
+      const d = addDays(start, i);
+      const dayEntries = entriesForDay(d, false);
+      return { day: d, totals: sumNutrients(dayEntries.map((e) => e.nutrients)), count: dayEntries.length };
+    }),
+    library: { meals: listMealTemplates(), days: listDayTemplates(), weeks: listWeekTemplates() },
+  };
+
+  const adherence = nutritionAdherence(from, day);
   const kcal = getSeries('nutrition.kcal', from, day);
   const protein = getSeries('nutrition.protein', from, day);
   const carbs = getSeries('nutrition.carbs', from, day);
@@ -29,8 +56,8 @@ export default async function NutritionPage() {
         <div>
           <h1>Nutrition</h1>
           <p className="page-sub">
-            Logged from MyFitnessPal, plus anything you add here. Plan a day and it sits alongside the log for
-            comparison.
+            Pulled from MyFitnessPal, plus anything logged here. Meals, days and whole weeks can be saved and
+            redeployed — amounts stay editable in grams, ounces or servings.
           </p>
         </div>
       </div>
@@ -60,7 +87,10 @@ export default async function NutritionPage() {
           />
         </div>
 
-        <Card title="Macros over the last 30 days" note="Protein, carbohydrate and fat all share the unit ‘grams’, so they share one axis. Energy is a different unit and gets its own chart below.">
+        <Card
+          title="Macros over the last 30 days"
+          note="Protein, carbohydrate and fat all share the unit ‘grams’, so they share one axis. Energy is a different unit and gets its own chart below."
+        >
           <ChartLegend
             items={[
               { label: 'Protein', color: SERIES_COLORS[0] },
@@ -79,7 +109,7 @@ export default async function NutritionPage() {
           />
         </Card>
 
-        <NutritionClient initial={initial} foods={foods} kcalSeries={kcal.points} />
+        <NutritionClient initial={initial} kcalSeries={kcal.points} />
       </div>
     </>
   );

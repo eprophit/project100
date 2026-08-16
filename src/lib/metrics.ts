@@ -1,5 +1,6 @@
 import { all } from './db';
 import type { DayKey } from './dates';
+import { FACTOR_SQL } from './nutrition';
 import type { Point, Series } from './types';
 
 /**
@@ -315,7 +316,7 @@ export const METRICS: MetricDef[] = [
     shape: 'bar',
     dp: 0,
     description: 'Total calories logged.',
-    sql: daily(`SELECT day, SUM(kcal) AS value FROM nutrition_entries
+    sql: daily(`SELECT day, SUM(n_kcal * ${FACTOR_SQL}) AS value FROM nutrition_entries
                 WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day`),
   },
   {
@@ -327,7 +328,7 @@ export const METRICS: MetricDef[] = [
     shape: 'bar',
     dp: 0,
     description: 'Total protein logged.',
-    sql: daily(`SELECT day, SUM(protein_g) AS value FROM nutrition_entries
+    sql: daily(`SELECT day, SUM(n_protein_g * ${FACTOR_SQL}) AS value FROM nutrition_entries
                 WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day`),
   },
   {
@@ -339,7 +340,7 @@ export const METRICS: MetricDef[] = [
     shape: 'bar',
     dp: 0,
     description: 'Total carbohydrate logged.',
-    sql: daily(`SELECT day, SUM(carbs_g) AS value FROM nutrition_entries
+    sql: daily(`SELECT day, SUM(n_carbs_g * ${FACTOR_SQL}) AS value FROM nutrition_entries
                 WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day`),
   },
   {
@@ -351,7 +352,7 @@ export const METRICS: MetricDef[] = [
     shape: 'bar',
     dp: 0,
     description: 'Total fat logged.',
-    sql: daily(`SELECT day, SUM(fat_g) AS value FROM nutrition_entries
+    sql: daily(`SELECT day, SUM(n_fat_g * ${FACTOR_SQL}) AS value FROM nutrition_entries
                 WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day`),
   },
   {
@@ -363,7 +364,7 @@ export const METRICS: MetricDef[] = [
     shape: 'bar',
     dp: 0,
     description: 'Total fibre logged.',
-    sql: daily(`SELECT day, SUM(fiber_g) AS value FROM nutrition_entries
+    sql: daily(`SELECT day, SUM(n_fiber_g * ${FACTOR_SQL}) AS value FROM nutrition_entries
                 WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day`),
   },
   {
@@ -375,7 +376,7 @@ export const METRICS: MetricDef[] = [
     shape: 'bar',
     dp: 0,
     description: 'Total sodium logged.',
-    sql: daily(`SELECT day, SUM(sodium_mg) AS value FROM nutrition_entries
+    sql: daily(`SELECT day, SUM(n_sodium_mg * ${FACTOR_SQL}) AS value FROM nutrition_entries
                 WHERE planned = 0 AND day BETWEEN ? AND ? GROUP BY day`),
   },
 
